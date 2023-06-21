@@ -1,0 +1,208 @@
+# =================================================================================================
+# This Sample Code is provided for the purpose of illustration only and is not intended to be 
+# used in a production environment.  THIS SAMPLE CODE AND ANY RELATED INFORMATION ARE PROVIDED 
+# "AS IS" WITHOUT WARRANTY OF ANY KIND, EITHER EXPRESSED OR IMPLIED, INCLUDING BUT NOT LIMITED 
+# TO THE IMPLIED WARRANTIES OF MERCHANTABILITY AND/OR FITNESS FOR A PARTICULAR PURPOSE.  We 
+# grant You a nonexclusive, royalty-free right to use and modify the Sample Code and to reproduce 
+# and distribute the object code form of the Sample Code, provided that You agree: (i) to not use 
+# Our name, logo, or trademarks to market Your software product in which the Sample Code is 
+# embedded; (ii) to include a valid copyright notice on Your software product in which the Sample
+# Code is embedded; and (iii) to indemnify, hold harmless, and defend Us and Our suppliers from 
+# and against any claims or lawsuits, including attorneys’ fees, that arise or result from the 
+# use or distribution of the Sample Code.
+# Please note: None of the conditions outlined in the disclaimer above will supersede the terms 
+# and conditions contained within the Premier Customer Services Description.
+# =================================================================================================
+# Install-Module -Name Az.ResourceGraph
+$tenantID = 'xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx'
+$tenantId = '5bda9e44-74f1-47eb-8741-460273dbb4bf'
+$tenantId = 'ab9bba98-684a-43fb-add8-9c2bebede229'
+Connect-AzAccount -Tenant $tenantID
+$data = @()
+# DISKS
+$query = 'Resources
+            | where type has "microsoft.compute/disks"
+            | extend diskState = tostring(properties.diskState)
+            | where managedBy == ""
+            | where not(name endswith "-ASRReplica" or name startswith "ms-asr-")
+            | extend Details = pack_all()
+            | project id, resourceGroup, diskState, sku.name, properties.diskSizeGB, location, tags, subscriptionId, Details'
+$result = Search-AzGraph -Query $query
+foreach ($item in $result) {
+    $row = [PSCustomObject]@{ 
+        Subscription = $item.subscriptionId
+        ResourceGroup = $item.resourceGroup
+        Type = 'disk'
+        Resource = $item.id
+    } 
+    $data += $row
+}
+# NETWORK INTERFACES
+$query = 'Resources
+            | where type has "microsoft.network/networkinterfaces"
+            | where isnull(properties.privateEndpoint)
+            | where isnull(properties.privateLinkService)
+            | where properties.hostedWorkloads == "[]"
+            | where properties !has "virtualmachine"
+            | extend Details = pack_all()
+            | project Resource=id, resourceGroup, location, tags, subscriptionId, Details'
+$result = Search-AzGraph -Query $query
+foreach ($item in $result) {
+    $row = [PSCustomObject]@{ 
+        Subscription = $item.subscriptionId
+        ResourceGroup = $item.resourceGroup
+        Type = 'network interface'
+        Resource = $item.Resource
+    } 
+    $data += $row
+}
+# PUBLIC IPs
+$query = 'Resources
+            | where type == "microsoft.network/publicipaddresses"
+            | where properties.ipConfiguration == "" and properties.natGateway == ""
+            | extend Details = pack_all()
+            | project Resource=id, resourceGroup, location, subscriptionId, sku.name, tags ,Details'
+$result = Search-AzGraph -Query $query
+foreach ($item in $result) {
+    $row = [PSCustomObject]@{ 
+        Subscription = $item.subscriptionId
+        ResourceGroup = $item.resourceGroup
+        Type = 'public ip'
+        Resource = $item.Resource
+    } 
+    $data += $row
+}
+# RESOURCE GROUPS
+$query = 'ResourceContainers
+             | where type == "microsoft.resources/subscriptions/resourcegroups"
+             | extend rgAndSub = strcat(resourceGroup, "--", subscriptionId)
+             | join kind=leftouter (
+                 Resources
+                 | extend rgAndSub = strcat(resourceGroup, "--", subscriptionId)
+                 | summarize count() by rgAndSub
+             ) on rgAndSub
+             | where isnull(count_)
+             | extend Details = pack_all()
+             | project subscriptionId, Resource=id, location, tags ,Details'
+$result = Search-AzGraph -Query $query
+foreach ($item in $result) {
+    $row = [PSCustomObject]@{ 
+        Subscription = $item.subscriptionId
+        ResourceGroup = $item.resourceGroup
+        Type = 'resource group'
+        Resource = $item.Resource
+    } 
+    $data += $row
+}
+# NSGs
+$query = 'Resources
+            | where type == "microsoft.network/networksecuritygroups" and isnull(properties.networkInterfaces) and isnull(properties.subnets)
+            | extend Details = pack_all()
+            | project subscriptionId, Resource=id, resourceGroup, location, tags, Details'
+$result = Search-AzGraph -Query $query
+foreach ($item in $result) {
+    $row = [PSCustomObject]@{ 
+        Subscription = $item.subscriptionId
+        ResourceGroup = $item.resourceGroup
+        Type = 'nsg'
+        Resource = $item.Resource
+    } 
+    $data += $row
+}
+# AVAILABILITY SETs
+$query = 'Resources
+            | where type =~ "Microsoft.Compute/availabilitySets"
+            | where properties.virtualMachines == "[]"
+            | extend Details = pack_all()
+            | project subscriptionId, Resource=id, resourceGroup, location, tags, Details'
+$result = Search-AzGraph -Query $query
+foreach ($item in $result) {
+    $row = [PSCustomObject]@{ 
+        Subscription = $item.subscriptionId
+        ResourceGroup = $item.resourceGroup
+        Type = 'availability set'
+        Resource = $item.Resource
+    } 
+    $data += $row
+}
+# ROUTE TABLES
+$query = 'resources
+            | where type == "microsoft.network/routetables"
+            | where isnull(properties.subnets)
+            | extend Details = pack_all()
+            | project subscriptionId, Resource=id, resourceGroup, location, tags, Details'
+$result = Search-AzGraph -Query $query
+foreach ($item in $result) {
+    $row = [PSCustomObject]@{ 
+        Subscription = $item.subscriptionId
+        ResourceGroup = $item.resourceGroup
+        Type = 'route table'
+        Resource = $item.Resource
+    } 
+    $data += $row
+}
+# LOAD BALANCERS
+$query = 'resources
+            | where type == "microsoft.network/loadbalancers"
+            | where properties.backendAddressPools == "[]"
+            | extend Details = pack_all()
+            | project subscriptionId, Resource=id, resourceGroup, location, tags, Details'
+$result = Search-AzGraph -Query $query
+foreach ($item in $result) {
+    $row = [PSCustomObject]@{ 
+        Subscription = $item.subscriptionId
+        ResourceGroup = $item.resourceGroup
+        Type = 'load balancer'
+        Resource = $item.Resource
+    } 
+    $data += $row
+}
+# APP SERVICE PLANS
+$query = 'resources
+            | where type =~ "microsoft.web/serverfarms"
+            | where properties.numberOfSites == 0
+            | extend Details = pack_all()
+            | project Resource=id, resourceGroup, location, subscriptionId, Sku=sku.name, Tier=sku.tier, tags ,Details'
+$result = Search-AzGraph -Query $query
+foreach ($item in $result) {
+    $row = [PSCustomObject]@{ 
+        Subscription = $item.subscriptionId
+        ResourceGroup = $item.resourceGroup
+        Type = 'app service plan'
+        Resource = $item.Resource
+    } 
+    $data += $row
+}
+# FRONT DOOR WAF POLICIES
+$query = 'resources
+            | where type == "microsoft.network/frontdoorwebapplicationfirewallpolicies"
+            | where properties.frontendEndpointLinks== "[]" and properties.securityPolicyLinks == "[]"
+            | extend Details = pack_all()
+            | project Resource=id, resourceGroup, location, subscriptionId, Sku=sku.name, tags, Details'
+$result = Search-AzGraph -Query $query
+foreach ($item in $result) {
+    $row = [PSCustomObject]@{ 
+        Subscription = $item.subscriptionId
+        ResourceGroup = $item.resourceGroup
+        Type = 'front door waf policy'
+        Resource = $item.Resource
+    } 
+    $data += $row
+}
+# TRAFFIC MANAGER PROFILES
+$query = 'resources
+            | where type == "microsoft.network/trafficmanagerprofiles"
+            | where properties.endpoints == "[]"
+            | extend Details = pack_all()
+            | project Resource=id, resourceGroup, location, subscriptionId, tags, Details'
+$result = Search-AzGraph -Query $query
+foreach ($item in $result) {
+    $row = [PSCustomObject]@{ 
+        Subscription = $item.subscriptionId
+        ResourceGroup = $item.resourceGroup
+        Type = 'traffice manager profile'
+        Resource = $item.Resource
+    } 
+    $data += $row
+}
+$data
