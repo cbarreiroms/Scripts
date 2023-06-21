@@ -1,0 +1,34 @@
+param(
+    [Parameter()]
+    $subscription = 'ID',
+
+    [Parameter()]
+    $tagName = 'StartStop',
+
+    [Parameter()]
+    $tagValue = 'True',
+
+    [Parameter()]
+    $resourceGroup = 'RG_NAME',
+
+    [Parameter()]
+    [bool]$shutdown = $false
+ )
+
+Connect-AzAccount -Identity -Subscription $subscription
+
+$vms = Get-AzVM -Status -ResourceGroupName $resourceGroup | where {$_.Tags.Keys.Contains($tagName) -and $_.Tags.Values.Contains($tagValue)}
+
+Write-Output ([String]::Format('Virtual Machines: {0}', $vms.count))
+
+foreach ($vm in $vms) {
+    if ($shutdown -and ($vm.PowerState -eq 'VM running')) {
+        Write-Output ([String]::Format('Stopping VM: {0}', $vm.Name))
+        Stop-AzVM -ResourceGroupName $resourceGroup -Name $vm.Name -Force        
+    } 
+
+    if (!$shutdown -and ($vm.PowerState -eq 'VM deallocated')) {
+        Write-Output ([String]::Format('Starting VM: {0}', $vm.Name))
+        Start-AzVM -ResourceGroupName $resourceGroup -Name $vm.Name
+    }
+}
