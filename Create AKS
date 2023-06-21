@@ -1,0 +1,101 @@
+# Check CLI Version
+az --version
+
+# Install AZ AKS Preview
+az extension add --name aks-preview
+
+# Global Variables
+$AKS_NAME     = "spoke003akslab001"
+$ACRName      = "acrspokeakslab001"
+$AKS_RG       = "RG-EASTUS-AKS-CLUSTER-SPOKE3-001"
+$AKS_Node_RG  = "RG-EASTUS-AKS-NODE-SPOKE3-001"
+$SUBSCRIPTION = "your subscription id here"
+$REGION       = "eastus"
+
+# Create Resource Group for AKS
+az group create --name $AKS_RG --location $REGION
+
+# Create container registry
+az acr create --resource-group $AKS_RG --name $ACRName  --sku Basic
+
+# log to container registry
+az acr login --name $ACRName
+
+# Get login server
+az acr list --resource-group $AKS_RG --query "[].{acrLoginServer:loginServer}" --output table
+
+# Push image to registry
+docker pull mcr.microsoft.com/hello-world
+docker tag mcr.microsoft.com/hello-world acrspokeakslab001.azurecr.io/hello-world:v1
+docker push acrspokeakslab001.azurecr.io/hello-world:v1
+# delete image from local computer
+docker rmi acrspokeakslab001.azurecr.io/hello-world:v1
+
+# Import image
+az acr import -n $ACRName --source docker.io/library/nginx:1.19.0 --image nginx:1.19.0
+
+# List container image
+az acr repository list --name $ACRName --output table
+az acr repository show-tags --name $ACRName --repository hello-world --output table
+#
+
+
+# Create a cluster using an existing VNET/Subnet and SSH RSA key
+$NET_RG        = "RG-EASTUS-SPOKE-3" 
+$VNET_NAME     = "VNET-EASTUS-SPOKE-3"
+$SUBNET_NAME   = "spoke3-snt-aks003"
+#$VNET_ID       =$(az network vnet show --resource-group $NET_RG --name $VNET_NAME --query id -o tsv)
+$SUBNET_ID     =$(az network vnet subnet show --resource-group $NET_RG --vnet-name $VNET_NAME --name $SUBNET_NAME --query id -o tsv)
+#
+#
+az aks create `
+  --name $AKS_NAME `
+  --resource-group $AKS_RG `
+  --subscription $SUBSCRIPTION `
+  --dns-name-prefix $AKS_NAME `
+  --dns-service-ip 10.2.0.10 `
+  --docker-bridge-address 172.17.0.1/16 `
+  --kubernetes-version 1.23.12 `
+  --location $REGION `
+  --network-plugin azure `
+  --network-policy azure `
+  --node-osdisk-size 500 `
+  --node-vm-size Standard_F8s `
+  --service-cidr 10.2.0.0/16 `
+  --load-balancer-sku standard `
+  --node-resource-group $AKS_Node_RG `
+  --nodepool-labels depto=IT costcenter=9000 `
+  --nodepool-name poolapp001 `
+  --enable-cluster-autoscaler `
+  --max-count 3 `
+  --min-count 1 `
+  --node-count 1 `
+  --vnet-subnet-id $SUBNET_ID `
+ --ssh-key-value C:\Users\user/.ssh/id_rsa.pub `
+  --attach-acr $ACRName `
+  --tags 'depto=IT' 'costcenter=9000'
+#
+
+### Application Gateway Ingress Controller ###
+# Create Public IP for Application Gateway
+$PIPAPPGW = "pip-spoke3-appgw-ingress"
+az network public-ip create -n $PIPAPPGW -g $AKS_RG  --allocation-method Static --sku Standard
+
+# Create Application Gateway
+$AppGatewayName = "appgwspoke003akslab001"
+$VNET_NAME      = "VNET-EASTUS-SPOKE-3"
+$SUBNET_APPGW   = "spoke3-snt-appgw01"
+$SUBNET_ID     =$(az network vnet subnet show --resource-group $NET_RG --vnet-name $VNET_NAME --name $SUBNET_APPGW --query id -o tsv)
+az network application-gateway create -n $AppGatewayName `
+    -l $REGION  `
+    -g $AKS_RG `
+    --sku Standard_v2 `
+    --public-ip-address $PIPAPPGW `
+    --vnet-name $VNET_NAME `
+    --subnet $SUBNET_APPGW 
+   
+
+# Enable the AGIC add-on in existing AKS
+$appgwId=$(az network application-gateway show -n $AppGatewayName -g $AKS_RG -o tsv --query "id") 
+az aks enable-addons -n $AKS_NAME -g $AKS_RG -a ingress-appgw --appgw-id $appgwId
+#
