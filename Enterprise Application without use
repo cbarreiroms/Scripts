@@ -46,3 +46,7 @@ foreach ($app in $apps){
 } 
 
 $data
+
+$data | ConvertTo-Json | Out-File c:\temp\ent_app.json
+$data | ConvertTo-Csv -NoTypeInformation | Out-File c:\temp\ent_app.csv
+
