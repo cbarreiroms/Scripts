@@ -1,0 +1,42 @@
+#BACKUP
+
+Connect-AzAccount -Tenant 'ID'
+
+Set-AzContext -Subscription 'ID'
+
+$stgaccname = 'apimbkp1'
+
+$location = 'brazilsouth'
+
+$rgname = 'LAB-API'
+
+New-AzStorageAccount -StorageAccountName $stgaccname -Location $location -ResourceGroupName $rgname -Type Standard_LRS
+
+$storageKey = (Get-AzStorageAccountKey -ResourceGroupName $rgname -StorageAccountName $stgaccname)[0].Value
+
+$storageContext = New-AzStorageContext -StorageAccountName $stgaccname -StorageAccountKey $storageKey
+
+
+Backup-AzApiManagement -ResourceGroupName $rgname -Name "apimgmtlab1"  -StorageContext $StorageContext -TargetContainerName "apimbkp" -TargetBlobName "backuppim2"
+
+##########################################################################################################################################################################################################
+#OBJECT REPLICATION DEVE SER HABILITADO ENTRE AS STORAGES.
+
+#RESTORE
+
+Set-AzContext -Subscription SubID
+
+
+$stgaccname = 'apimbkp2'
+
+$location = 'japanwest'
+
+$rgname = 'LAB-API2'
+
+New-AzStorageAccount -StorageAccountName $stgaccname -Location $location -ResourceGroupName $rgname -Type Standard_LRS
+
+$storageKey = (Get-AzStorageAccountKey -ResourceGroupName $rgname -StorageAccountName $stgaccname)[0].Value
+
+$storageContext = New-AzStorageContext -StorageAccountName $stgaccname -StorageAccountKey $storageKey
+
+Restore-AzApiManagement -ResourceGroupName $rgname -Name 'apimgmtlab2'  -StorageContext $storageContext -SourceContainerName 'apimbkp' -SourceBlobName 'backuppim3' 
