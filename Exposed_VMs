@@ -1,0 +1,249 @@
+# =================================================================================================
+# This Sample Code is provided for the purpose of illustration only and is not intended to be 
+# used in a production environment.  THIS SAMPLE CODE AND ANY RELATED INFORMATION ARE PROVIDED 
+# "AS IS" WITHOUT WARRANTY OF ANY KIND, EITHER EXPRESSED OR IMPLIED, INCLUDING BUT NOT LIMITED 
+# TO THE IMPLIED WARRANTIES OF MERCHANTABILITY AND/OR FITNESS FOR A PARTICULAR PURPOSE.  We 
+# grant You a nonexclusive, royalty-free right to use and modify the Sample Code and to reproduce 
+# and distribute the object code form of the Sample Code, provided that You agree: (i) to not use 
+# Our name, logo, or trademarks to market Your software product in which the Sample Code is 
+# embedded; (ii) to include a valid copyright notice on Your software product in which the Sample
+# Code is embedded; and (iii) to indemnify, hold harmless, and defend Us and Our suppliers from 
+# and against any claims or lawsuits, including attorneys’ fees, that arise or result from the 
+# use or distribution of the Sample Code.
+
+# Please note: None of the conditions outlined in the disclaimer above will supersede the terms 
+# and conditions contained within the Premier Customer Services Description.
+# =================================================================================================
+
+Install-Module -Name Az.ResourceGraph
+
+$tenantID = ''
+
+Clear-Host
+
+Write-Host "-> Connecting to tenant: $tenantId" -ForegroundColor Yellow
+
+Connect-AzAccount -Tenant $tenantID -WarningAction SilentlyContinue | Out-Null
+
+$global:data = @()
+
+function ExecuteQuery($query) {
+    $pageSize = 500
+    $skip = 0
+    $results = @()
+    $firstIteration = $true
+
+    do {
+        if ($firstIteration) {
+            $currentResults = Search-AzGraph -Query $query -First $pageSize
+            $firstIteration = $false
+        } else {
+            $currentResults = Search-AzGraph -Query $query -First $pageSize -Skip $skip
+        }
+
+        $results += $currentResults
+        $skip += $pageSize
+    } while ($currentResults.Count -eq $pageSize)
+
+    return $results
+}
+
+function Contains-Value {
+    param (
+        [string]$inputString,
+        [int]$valueToCheck
+    )
+
+    $segments = $inputString -split ';'
+
+    foreach ($segment in $segments) {
+        if ($segment -contains $valueToCheck) {
+            return $true
+        } elseif ($segment -match '-') {
+            $range = $segment -split '-'
+            $lowerBound = [int]$range[0]
+            $upperBound = [int]$range[1]
+
+            if ($valueToCheck -ge $lowerBound -and $valueToCheck -le $upperBound) {
+                return $true
+            }
+        }
+    }
+
+    return $false
+}
+
+$queryvms = "Resources
+            | where type =~ 'microsoft.compute/virtualmachines'
+            | extend nics=array_length(properties.networkProfile.networkInterfaces)
+            | mv-expand nic=properties.networkProfile.networkInterfaces
+            | mv-expand status=properties.extended.instanceView.powerState.displayStatus
+            | where nics == 1 or nic.properties.primary =~ 'true' or isempty(nic)
+            | project vmId = id, vmName = name, vmStatus = tostring(status), vmSize=tostring(properties.hardwareProfile.vmSize), nicId = tostring(nic.id)
+            | join kind=leftouter (
+                Resources
+                | where type =~ 'microsoft.network/networkinterfaces'
+                | extend ipConfigsCount=array_length(properties.ipConfigurations)
+                | mv-expand ipconfig=properties.ipConfigurations
+                | where ipConfigsCount == 1 or ipconfig.properties.primary =~ 'true'
+                | project nicId = id, subnetId = tostring(ipconfig.properties.subnet.id) , publicIpId = tostring(ipconfig.properties.publicIPAddress.id)) 
+                on nicId
+                | project-away nicId1
+                | summarize by vmName, vmStatus, vmId, nicId, subnetId, publicIpId
+                | join kind=leftouter (
+                    Resources
+                    | where type =~ 'microsoft.network/publicipaddresses'
+                    | project publicIpId = id, publicIpAddress = properties.ipAddress)
+                    on publicIpId
+                    | project-away publicIpId1
+                    | where isnotnull(publicIpAddress)
+                    | parse kind=regex subnetId with '/virtualNetworks/' virtualNetwork '/subnets/' subnet
+                    | join kind=leftouter (
+                        Resources
+                        | where type =~ 'microsoft.network/networksecuritygroups' and isnotnull(properties.{0})
+                        | project nsgId = id, {2} = properties.{0}
+                        | mv-expand {2}
+                        | extend {1}Id_ = tostring({2}.id))
+                        on `$left.{1}Id == `$right.{1}Id_ 
+                        | project vmName, vmStatus, vmId, nicId, subnetId, publicIpId, publicIpAddress, virtualNetwork, subnet, nsgId, nsgType = '{1}'"
+
+$querynics = [String]::Format($queryvms, 'networkInterfaces', 'nic', 'nics')
+$vmsnics = ExecuteQuery $querynics
+
+$querysubnets = [String]::Format($queryvms, 'subnets', 'subnet', 'subnets')
+$vmssubnets = ExecuteQuery $querysubnets
+
+$combined = $vmsnics + $vmssubnets
+$grouped = $combined | Group-Object -Property vmId
+
+$allvms = $grouped | ForEach-Object {
+    $nullCount = 0
+    $nonNullNsg = $null
+    $nonNullType = $null
+
+    foreach ($item in $_.Group) {
+        if ([String]::IsNullOrEmpty($item.NsgId)) {
+            $nullCount++
+        } else {
+            $nonNullNsg = $item.NsgId
+            $nonNullType = $item.nsgType
+        }
+    }
+
+    if ($nullCount -eq 2) {
+        $type = $null
+        $nsg = $null
+    } else {
+        $type = $nonNullType
+        $nsg = $nonNullNsg
+    }
+
+    [PSCustomObject]@{
+        vmId = $_.Name
+        vmName = $_.Group[0].vmName
+        vmStatus = $_.Group[0].vmStatus
+        nicId = $_.Group[0].nicId
+        subnetId = $_.Group[0].subnetId
+        publicIpId = $_.Group[0].publicIpId
+        publicIpAddress = $_.Group[0].publicIpAddress
+        virtualNetwork = $_.Group[0].virtualNetwork
+        subnet = $_.Group[0].subnet
+        
+        nsgType = $type
+        nsgId = $nsg
+    }
+}
+
+$querynsgs = "Resources
+                | where type =~ 'microsoft.network/networksecuritygroups'
+                | join kind=leftouter (ResourceContainers | where type=='microsoft.resources/subscriptions' | project SubcriptionName=name, subscriptionId) on subscriptionId
+                | mv-expand rules=properties.securityRules
+                | extend rulename = tostring(rules.name)
+                | extend direction = tostring(rules.properties.direction)
+                | extend priority = toint(rules.properties.priority)
+                | extend description = rules.properties.description
+                | extend destprefix = rules.properties.destinationAddressPrefix
+                | extend destprefixes = rules.properties.destinationAddressPrefixes
+                | extend destport = rules.properties.destinationPortRange
+                | extend destportranges = rules.properties.destinationPortRanges
+                | extend sourceprefix = rules.properties.sourceAddressPrefix
+                | extend sourcePrefixes = rules.properties.sourceAddressPrefixes
+                | extend sourceport = rules.properties.sourcePortRange
+                | extend sourceportRanges = rules.properties.sourcePortRanges
+                | extend access = rules.properties.access
+                | project id, subscriptionId, name, rulename, direction, access, priority, destprefix, destprefixes, destport, destportranges, sourceprefix, sourcePrefixes, sourceport, sourceportRanges, description
+                | where direction == 'Inbound' and ['access'] == 'Allow'"
+
+$nsgs = ExecuteQuery $querynsgs
+
+$results = @()
+
+foreach ($vm in $allvms) {
+    if ($vm.nsgType) {
+        $vmnsgs = $nsgs | Where-Object { $_.id -eq $vm.nsgId }
+
+        foreach ($vmnsg in $vmnsgs) {
+            $destportranges = ([String]::Join(';', $vmnsg.destportranges))
+            $sourceportranges = ([String]::Join(';', $vmnsg.sourceportranges))
+
+            $sourcePrefixes = ([String]::Join(';', $vmnsg.sourcePrefixes))
+            $destprefixes = ([String]::Join(';', $vmnsg.destprefixes))
+
+            $ssh = (Contains-Value $vmnsg.destport '22') -or (Contains-Value $destportranges '22') 
+            $rdp = (Contains-Value $vmnsg.destport '3389') -or (Contains-Value $destportranges '3389')
+
+            if (($ssh -or $rdp) -and ($vmnsg.sourcePrefixes.Count -eq 0) -and ($vmnsg.sourceprefix -contains '*' -or $vmnsg.sourceprefix -contains '0.0.0.0/0')) {
+                Add-Member -InputObject $vm -NotePropertyName ssh -NotePropertyValue $ssh -Force
+                Add-Member -InputObject $vm -NotePropertyName rdp -NotePropertyValue $rdp -Force
+
+                Add-Member -InputObject $vm -NotePropertyName name -NotePropertyValue $vmnsg.name -Force
+                Add-Member -InputObject $vm -NotePropertyName rule -NotePropertyValue $vmnsg.rulename -Force
+                Add-Member -InputObject $vm -NotePropertyName priority -NotePropertyValue $vmnsg.priority -Force
+                Add-Member -InputObject $vm -NotePropertyName destprefix -NotePropertyValue $vmnsg.destprefix -Force
+                Add-Member -InputObject $vm -NotePropertyName destprefixes -NotePropertyValue $destprefixes -Force
+                Add-Member -InputObject $vm -NotePropertyName destport -NotePropertyValue $vmnsg.destport -Force
+                Add-Member -InputObject $vm -NotePropertyName destportranges -NotePropertyValue $destportranges -Force
+                Add-Member -InputObject $vm -NotePropertyName sourceprefix -NotePropertyValue $vmnsg.sourceprefix -Force
+                Add-Member -InputObject $vm -NotePropertyName sourcePrefixes -NotePropertyValue $sourcePrefixes -Force
+                Add-Member -InputObject $vm -NotePropertyName sourceport -NotePropertyValue $vmnsg.sourceport -Force
+                Add-Member -InputObject $vm -NotePropertyName sourceportRanges -NotePropertyValue $sourceportranges -Force
+                Add-Member -InputObject $vm -NotePropertyName description -NotePropertyValue $vmnsg.description -Force
+
+                $results += $vm.psobject.copy() #($vm | ConvertTo-Json | ConvertFrom-Json)
+            }
+        }
+    } else {
+        Add-Member -InputObject $vm -NotePropertyName ssh -NotePropertyValue $true -Force
+        Add-Member -InputObject $vm -NotePropertyName rdp -NotePropertyValue $true -Force
+
+        $results += $vm.psobject.copy() #($vm | ConvertTo-Json | ConvertFrom-Json)
+    }
+}
+
+Write-Host "Testing VM`'s"
+
+$OriginalProgressPreference = $Global:ProgressPreference
+$Global:ProgressPreference = 'SilentlyContinue'
+
+$results | Foreach-Object -ThrottleLimit 10 -Parallel {
+    if ($_.vmStatus -eq 'VM running') {
+        $ping = $null
+        if ($_.ssh) {
+            $ping = Test-NetConnection -ComputerName $_.publicIpAddress -Port 22 -WarningAction Ignore
+            Add-Member -InputObject $_ -NotePropertyName sshopen -NotePropertyValue $ping.TcpTestSucceeded -Force
+        }
+
+        $ping = $null
+        if ($_.rdp) { 
+            $ping = Test-NetConnection -ComputerName $_.publicIpAddress -Port 3389 -WarningAction Ignore
+            Add-Member -InputObject $_ -NotePropertyName rdpopen -NotePropertyValue $ping.TcpTestSucceeded -Force
+        }        
+    } else {
+        Add-Member -InputObject $_ -NotePropertyName sshopen -NotePropertyValue $_.vmStatus -Force
+        Add-Member -InputObject $_ -NotePropertyName rdpopen -NotePropertyValue $_.vmStatus -Force
+    }
+}
+
+$Global:ProgressPreference = $OriginalProgressPreference
+
+$results | ConvertTo-Json | Out-File -FilePath c:\temp\sshrdp.json
