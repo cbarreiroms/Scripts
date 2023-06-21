@@ -1,0 +1,21 @@
+Connect-AzAccount
+
+Set-AzContext -Subscription "subscription"
+
+$vms = Get-AzVM -status
+
+$vms.Count
+
+foreach ($vm in $vms) {
+    $vm.PowerState
+    Stop-AzVM -Name $vm.Name -ResourceGroupName $vm.ResourceGroupName -Force
+}
+
+$fw = Get-AzFirewall
+
+$fw.Deallocate()
+Set-AzFirewall -AzureFirewall $fw
+
+$vnet = Get-AzVirtualNetwork -ResourceGroupName "rg_name" -Name "vnet_name"
+$publicip1 = Get-AzPublicIpAddress -Name "fwip" -ResourceGroupName "rg_name"
+$fw.Allocate($vnet,@($publicip1))
