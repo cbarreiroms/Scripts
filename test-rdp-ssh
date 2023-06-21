@@ -1,0 +1,102 @@
+# =================================================================================================
+# This Sample Code is provided for the purpose of illustration only and is not intended to be 
+# used in a production environment.  THIS SAMPLE CODE AND ANY RELATED INFORMATION ARE PROVIDED 
+# "AS IS" WITHOUT WARRANTY OF ANY KIND, EITHER EXPRESSED OR IMPLIED, INCLUDING BUT NOT LIMITED 
+# TO THE IMPLIED WARRANTIES OF MERCHANTABILITY AND/OR FITNESS FOR A PARTICULAR PURPOSE.  We 
+# grant You a nonexclusive, royalty-free right to use and modify the Sample Code and to reproduce 
+# and distribute the object code form of the Sample Code, provided that You agree: (i) to not use 
+# Our name, logo, or trademarks to market Your software product in which the Sample Code is 
+# embedded; (ii) to include a valid copyright notice on Your software product in which the Sample
+# Code is embedded; and (iii) to indemnify, hold harmless, and defend Us and Our suppliers from 
+# and against any claims or lawsuits, including attorneys’ fees, that arise or result from the 
+# use or distribution of the Sample Code.
+
+# Please note: None of the conditions outlined in the disclaimer above will supersede the terms 
+# and conditions contained within the Premier Customer Services Description.
+# =================================================================================================
+
+Install-Module -Name Az.ResourceGraph
+
+$tenantID = 'ID'
+$subscription = 'ID'
+
+Clear-Host
+
+Write-Host "-> Connecting to tenant: $tenantId" -ForegroundColor Yellow
+
+#Connect-AzAccount -Tenant $tenantID -WarningAction SilentlyContinue | Out-Null
+
+$global:data = @()
+
+function ExecuteQuery($query) {
+    $pageSize = 500
+    $skip = 0
+    $results = @()
+    $firstIteration = $true
+
+    do {
+        if ($firstIteration) {
+            $currentResults = Search-AzGraph -Query $query -First $pageSize
+            $firstIteration = $false
+        } else {
+            $currentResults = Search-AzGraph -Query $query -First $pageSize -Skip $skip
+        }
+
+        $results += $currentResults
+        $skip += $pageSize
+    } while ($currentResults.Count -eq $pageSize)
+
+    return $results
+}
+
+$queryvms = "Resources
+            | where type =~ 'microsoft.compute/virtualmachines'
+            | extend nics=array_length(properties.networkProfile.networkInterfaces)
+            | mv-expand nic=properties.networkProfile.networkInterfaces
+            | mv-expand status=properties.extended.instanceView.powerState.displayStatus
+            | where nics == 1 or nic.properties.primary =~ 'true' or isempty(nic)
+            | project vmId = id, vmName = name, vmStatus = tostring(status), vmSize=tostring(properties.hardwareProfile.vmSize), nicId = tostring(nic.id)
+            | join kind=leftouter (
+                Resources
+                | where type =~ 'microsoft.network/networkinterfaces'
+                | extend ipConfigsCount=array_length(properties.ipConfigurations)
+                | mv-expand ipconfig=properties.ipConfigurations
+                | where ipConfigsCount == 1 or ipconfig.properties.primary =~ 'true'
+                | project nicId = id, subnetId = tostring(ipconfig.properties.subnet.id) , publicIpId = tostring(ipconfig.properties.publicIPAddress.id)) 
+                on nicId
+                | project-away nicId1
+                | summarize by vmName, vmStatus, vmId, nicId, subnetId, publicIpId
+                | join kind=leftouter (
+                    Resources
+                    | where type =~ 'microsoft.network/publicipaddresses'
+                    | project publicIpId = id, publicIpAddress = properties.ipAddress)
+                    on publicIpId
+                    | project-away publicIpId1
+                    | where isnotnull(publicIpAddress)
+                    | parse kind=regex subnetId with '/virtualNetworks/' virtualNetwork '/subnets/' subnet"
+
+$allvms = ExecuteQuery $queryvms
+
+
+Write-Host "Testing VM`'s"
+
+$OriginalProgressPreference = $Global:ProgressPreference
+$Global:ProgressPreference = 'SilentlyContinue'
+
+$allvms = $allvms | Where-Object { $_.vmStatus -eq 'VM running' }
+
+$allvms | Foreach-Object -ThrottleLimit 25 -Parallel {
+    Write-Host "Testing: $($_.vmName) - $($_.publicIpAddress)"
+
+    $ping = Test-NetConnection -ComputerName $_.publicIpAddress -Port 22 -WarningAction Ignore
+    Add-Member -InputObject $_ -NotePropertyName sshopen -NotePropertyValue $ping.TcpTestSucceeded -Force
+
+    $ping = Test-NetConnection -ComputerName $_.publicIpAddress -Port 3389 -WarningAction Ignore
+    Add-Member -InputObject $_ -NotePropertyName rdpopen -NotePropertyValue $ping.TcpTestSucceeded -Force 
+    
+    Write-Host "Finished: $($_.vmName) - $($ping.TcpTestSucceeded)"
+}
+
+$Global:ProgressPreference = $OriginalProgressPreference
+
+$allvms | ConvertTo-Json | Out-File -FilePath c:\temp\allsshrdp.json
