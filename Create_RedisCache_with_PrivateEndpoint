@@ -1,0 +1,110 @@
+# =================================================================================================
+# This Sample Code is provided for the purpose of illustration only and is not intended to be 
+# used in a production environment.  THIS SAMPLE CODE AND ANY RELATED INFORMATION ARE PROVIDED 
+# "AS IS" WITHOUT WARRANTY OF ANY KIND, EITHER EXPRESSED OR IMPLIED, INCLUDING BUT NOT LIMITED 
+# TO THE IMPLIED WARRANTIES OF MERCHANTABILITY AND/OR FITNESS FOR A PARTICULAR PURPOSE.  We 
+# grant You a nonexclusive, royalty-free right to use and modify the Sample Code and to reproduce 
+# and distribute the object code form of the Sample Code, provided that You agree: (i) to not use 
+# Our name, logo, or trademarks to market Your software product in which the Sample Code is 
+# embedded; (ii) to include a valid copyright notice on Your software product in which the Sample
+# Code is embedded; and (iii) to indemnify, hold harmless, and defend Us and Our suppliers from 
+# and against any claims or lawsuits, including attorneys’ fees, that arise or result from the 
+# use or distribution of the Sample Code.
+# Please note: None of the conditions outlined in the disclaimer above will supersede the terms 
+# and conditions contained within the Premier Customer Services Description.
+# =================================================================================================
+
+# Definir variáveis
+$tenantId = ''
+$subscriptionId = ""
+$vnetResourceGroupName = ""
+$resourceGroupName = ""
+$location = "brazilsouth"
+$redisName = ""
+$privateEndpointName = ""
+$sku = "Standard"
+$vnetName = ""
+$subnetName = ""
+
+# Conectar à conta do Azure
+Connect-AzAccount -Tenant $tenantId | Out-Null
+
+# Selecionar a subscription
+Select-AzSubscription -SubscriptionId $subscriptionId
+
+# Obter informações de subrede da rede virtual
+$vnet = Get-AzVirtualNetwork -Name $vnetName -ResourceGroupName $vnetResourceGroupName
+$subnet = $vnet | Select-Object -ExpandProperty subnets | Where-Object Name -eq $subnetName
+$subnetConfig = Get-AzVirtualNetworkSubnetConfig -VirtualNetwork $vnet -Name $subnetName
+
+# Criar o Resource Group
+$params = @{
+    Name = $resourceGroupName
+    Location = $location
+}
+New-AzResourceGroup @params
+
+# Crie o serviço de cache Redis com um perfil de acesso privado
+$redis = New-AzRedisCache `
+        -ResourceGroupName $resourceGroupName  `
+        -Location $location `
+        -Name $redisName `
+        -Sku $sku `
+        -EnableNonSslPort $false `
+        -MinimumTlsVersion '1.2' `
+        -Size 250MB
+$redis = Get-AzRedisCache -ResourceGroupName $resourceGroupName -Name $redisName
+while ($redis.ProvisioningState -ne 'Succeeded') {
+    Start-Sleep -Seconds 5
+    $redis = Get-AzRedisCache -ResourceGroupName $resourceGroupName -Name $redisName
+}
+
+# Criar a conexão do serviço de link privado
+$params = @{
+    Name = $privateEndpointName
+    PrivateLinkServiceId = $redis.Id
+    GroupId = 'redisCache'
+}
+$privateEndpointConnection = New-AzPrivateLinkServiceConnection @params
+
+# Criar o ponto de extremidade privado
+$params = @{
+    ResourceGroupName = $resourceGroupName
+    Name = $privateEndpointName
+    Location = $location
+    Subnet = $subnetConfig
+    PrivateLinkServiceConnection = $privateEndpointConnection
+}
+$privateEndpoint = New-AzPrivateEndpoint @params
+
+# Criar a zona de DNS privado
+$params = @{
+    ResourceGroupName = $resourceGroupName
+    Name = 'privatelink.redis.cache.windows.net'
+}
+$zone = New-AzPrivateDnsZone @params
+
+# Criar o link de rede virtual de DNS privado
+$params = @{
+    ResourceGroupName = $resourceGroupName
+    ZoneName = 'privatelink.redis.cache.windows.net'
+    Name = 'rc-link'
+    VirtualNetworkId = $vnet.Id
+}
+$link = New-AzPrivateDnsVirtualNetworkLink @params
+
+# Configurar a zona de DNS privado
+$params = @{
+    Name = 'privatelink.redis.cache.windows.net'
+    PrivateDnsZoneId = $zone.ResourceId
+}
+$config = New-AzPrivateDnsZoneConfig @params
+
+# Criar o grupo de zona de DNS privado
+$params = @{
+    ResourceGroupName = $resourceGroupName
+    PrivateEndpointName = $privateEndpointName
+    Name = 'myZoneGroup'
+    PrivateDnsZoneConfig = $config
+}
+New-AzPrivateDnsZoneGroup @params
