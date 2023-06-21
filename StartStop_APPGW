@@ -1,0 +1,7 @@
+Connect-AzAccount -Tenant ''
+
+Set-AzContext -Subscription ""
+
+$appgtw = Get-AzApplicationGateway -ResourceGroupName Temp -Name appgw1
+
+Stop-AzApplicationGateway -ApplicationGateway $appgtw
